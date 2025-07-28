@@ -25,4 +25,5 @@ python main.py
 ```
 
 At the end of the run the file `snappfood_vendor_products.xlsx` will be created
-with all collected product data.
+with all collected product data. All console output is also written to
+`crawler.log` for later review.

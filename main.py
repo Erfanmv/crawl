@@ -13,6 +13,9 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 import requests
@@ -104,7 +107,7 @@ class SnappFoodCrawler:
                             fh.write(chunk)
             return dest
         except Exception as exc:
-            print(f"      ↳ image download failed: {exc}")
+            logger.error(f"      ↳ image download failed: {exc}")
             return None
 
     # --------------------------- JSON helpers ------------------------------ #
@@ -120,15 +123,17 @@ class SnappFoodCrawler:
         # 2) manual Brotli
         if "br" in enc:
             if not BROTLI_OK:
-                print(f"[{vid}] attempt {attempt} via {ip} → Brotli body but "
-                      f"'brotli' module not installed")
+                logger.error(
+                    f"[{vid}] attempt {attempt} via {ip} → Brotli body but 'brotli' module not installed"
+                )
                 return None
             try:
                 raw = _brotli.decompress(res.content)
                 return json.loads(raw)
             except Exception as exc:
-                print(f"[{vid}] attempt {attempt} via {ip} → manual Brotli "
-                      f"decompress failed: {exc}")
+                logger.error(
+                    f"[{vid}] attempt {attempt} via {ip} → manual Brotli decompress failed: {exc}"
+                )
                 return None
         # 3) UTF-8 fallback
         try:
@@ -136,8 +141,9 @@ class SnappFoodCrawler:
             return json.loads(text)
         except Exception:
             snippet = res.text[:120].replace("\n", " ")
-            print(f"[{vid}] attempt {attempt} via {ip} → failed to parse "
-                  f"JSON | {snippet!r}")
+            logger.error(
+                f"[{vid}] attempt {attempt} via {ip} → failed to parse JSON | {snippet!r}"
+            )
             return None
 
     # --------------------------- workflow ---------------------------------- #
@@ -147,7 +153,7 @@ class SnappFoodCrawler:
         if not need.issubset(df.columns):
             raise ValueError(f"Vendor file missing columns: {need - set(df.columns)}")
         self.vendors = df.to_dict(orient="records")
-        print(f"Loaded {len(self.vendors)} vendors\n")
+        logger.info(f"Loaded {len(self.vendors)} vendors")
 
     def _try_request(self, vid: int, vcode: str, lat: float, lon: float) -> Optional[dict]:
         for attempt in range(1, self.max_attempts + 1):
@@ -159,17 +165,22 @@ class SnappFoodCrawler:
             url = self.URL_TMPL.format(
                 lat=f"{lat:.6f}", lon=f"{lon:.6f}", vendor_code=vcode,
             )
+            logger.info(f"[{vid}] attempt {attempt}/{self.max_attempts} using IP {ip}")
             if self.verbose:
-                print(f"[DEBUG] v{vid} a{attempt} url → {url}")
+                logger.debug(f"v{vid} a{attempt} url → {url}")
 
             try:
                 res = sess.get(url, timeout=15)
             except Exception as exc:
-                print(f"[{vid}] attempt {attempt}/{self.max_attempts} net-err via {ip}: {exc}")
+                logger.error(
+                    f"[{vid}] attempt {attempt}/{self.max_attempts} net-err via {ip}: {exc}"
+                )
                 continue
             if res.status_code != 200:
                 snippet = res.text[:100].replace("\n", " ")
-                print(f"[{vid}] attempt {attempt} via {ip} → HTTP {res.status_code} | {snippet!r}")
+                logger.error(
+                    f"[{vid}] attempt {attempt} via {ip} → HTTP {res.status_code} | {snippet!r}"
+                )
                 continue
             data = self._decode_json(res, vid, attempt, ip)
             if data is not None:
@@ -217,17 +228,17 @@ class SnappFoodCrawler:
 
         for idx, v in enumerate(self.vendors, 1):
             vid, vcode, lat, lon = v["vendor_id"], v["vendor_code"], v["lat"], v["lon"]
-            print(f"[{idx}/{len(self.vendors)}] vendor {vid} ({vcode})")
+            logger.info(f"[{idx}/{len(self.vendors)}] vendor {vid} ({vcode})")
 
             payload = self._try_request(vid, vcode, lat, lon)
             if not payload or not payload.get("status"):
-                print(f"[{vid}] skipped – no success\n")
+                logger.warning(f"[{vid}] skipped – no success")
                 time.sleep(random.uniform(*self.vendor_delay))
                 continue
 
             menus = payload.get("data", {}).get("menus", [])
             if not menus:
-                print(f"[{vid}] no menus\n")
+                logger.warning(f"[{vid}] no menus")
                 time.sleep(random.uniform(*self.vendor_delay))
                 continue
 
@@ -238,11 +249,11 @@ class SnappFoodCrawler:
                     self._process_product(sess, prod, vid, cid, ctit)
                     time.sleep(self.product_delay)
 
-            print(f"[{vid}] done – total products so far {len(self.records)}\n")
+            logger.info(f"[{vid}] done – total products so far {len(self.records)}")
             time.sleep(random.uniform(*self.vendor_delay))
 
         if not self.records:
-            print("No products collected.")
+            logger.warning("No products collected.")
             return
 
         df = pd.DataFrame(self.records)
@@ -253,12 +264,21 @@ class SnappFoodCrawler:
         ]
         df = df[cols]
         df.to_excel("snappfood_vendor_products.xlsx", index=False, engine="openpyxl")
-        print(f"\nSaved {len(df)} rows → snappfood_vendor_products.xlsx  "
-              f"({time.time()-t0:.1f}s)")
+        logger.info(
+            f"Saved {len(df)} rows → snappfood_vendor_products.xlsx  ({time.time()-t0:.1f}s)"
+        )
 
 
 # -----------------------------------------------------------------------------#
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.FileHandler("crawler.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
     crawler = SnappFoodCrawler(
         vendor_file="snappfood_vendors.xlsx",
         vendor_delay=(1.0, 2.0),
